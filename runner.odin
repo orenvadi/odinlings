@@ -4,9 +4,9 @@ import "core:os"
 import "core:fmt"
 import "core:log"
 import "core:strconv"
-import "core:reflect"
 import "core:strings"
 import "core:c/libc"
+import "core:slice"
 
 filename :: "current_exercise.txt"
 
@@ -25,23 +25,24 @@ main :: proc(){
         return
     }
 
-    dir, open_err := os.open("exercises")
-    defer os.close(dir)
-    if(open_err != nil){
-        log.fatalf("failed to open exercises directory - %s", reflect.enum_string(open_err))
-        return
-    }
-
-    infos, read_err := os.read_dir(dir, 1024)
-    defer delete(infos)
+    infos, read_err := os.read_all_directory_by_path("exercises", context.allocator)
+    defer os.file_info_slice_delete(infos, context.allocator)
     if(read_err != nil){
-        log.fatalf("failed to read exercises directory - %s", reflect.enum_string(read_err))
+        log.fatalf("failed to read exercises directory - %v", read_err)
         return
     }
 
-    current_exercise_file: []u8
-    current_exercise_file, read_err = os.read_entire_file_from_filename_or_err(filename)
-    current_exercise := strconv.atoi(transmute(string)current_exercise_file)
+    //the os does not guarantee any order, so sort the exercises by their file name (01_, 02_, ...)
+    slice.sort_by(infos, proc(a, b: os.File_Info) -> bool { return a.name < b.name })
+
+    current_exercise_file, file_err := os.read_entire_file(filename, context.allocator)
+    defer delete(current_exercise_file)
+    if(file_err != nil){
+        log.fatalf("failed to read %s, run init.sh / init.bat first - %v", filename, file_err)
+        return
+    }
+    current_exercise := strconv.parse_int(strings.trim_space(string(current_exercise_file))) or_else 0
+    current_exercise = clamp(current_exercise, 0, len(infos)-1)
     
     switch os.args[1]{
         case "run" : run_exer(infos, current_exercise)
@@ -66,11 +67,9 @@ run_exer :: proc(infos: []os.File_Info, curr: int){
     to_run := infos[curr]
     fmt.printf("running %s\n", to_run.fullpath)
 
-    cmd: strings.Builder
-    defer strings.builder_destroy(&cmd)
-    cmd_str := fmt.sbprintf(&cmd, "odin run %s -file -sanitize:address -out:odin-out/%s.exe", to_run.fullpath, to_run.name)
-    
-    libc.system(strings.to_cstring(&cmd))
+    cmd := fmt.ctprintf("odin run %s -file -sanitize:address -out:odin-out/%s.exe", to_run.fullpath, to_run.name)
+
+    libc.system(cmd)
 
 }
 
@@ -84,16 +83,12 @@ next_exer :: proc(infos: []os.File_Info, curr: int){
 
 
     num := curr+1
-    if(num < 1 || num >= len(infos)){
+    if(num >= len(infos)){
         log.errorf("%d is out of range", num)
         return
     }
 
-    buf := make([]u8, size_of(int))
-    err := os.write_entire_file_or_err(filename, transmute([]u8)strconv.itoa(buf, num))
-    if(err != nil){
-        log.fatalf("failed to increment tracked exercise - %s", reflect.enum_string(err))
-    }
+    save_exer(num)
 
     return
 }
@@ -101,16 +96,12 @@ next_exer :: proc(infos: []os.File_Info, curr: int){
 prev_exer :: proc(infos: []os.File_Info, curr: int){
     
     num := curr-1
-    if(num < 0 || num > len(infos)){
+    if(num < 0){
         log.errorf("%d is out of range", num)
         return
     }
 
-    buf := make([]u8, size_of(int))
-    err := os.write_entire_file_or_err(filename, transmute([]u8)strconv.itoa(buf, num))
-    if(err != nil){
-        log.fatalf("failed to increment tracked exercise - %s", reflect.enum_string(err))
-    }
+    save_exer(num)
 
     return
 }
@@ -122,7 +113,7 @@ goto_exer :: proc(infos: []os.File_Info){
         return
     }
     
-    num := strconv.atoi(os.args[2])
+    num := strconv.parse_int(os.args[2]) or_else -1
     
     if(num < 1 || num > len(infos)){
         log.errorf("%d is out of range", num)
@@ -130,27 +121,15 @@ goto_exer :: proc(infos: []os.File_Info){
     }
 
 
-    buf := make([]u8, size_of(int))
-    err := os.write_entire_file_or_err(filename, transmute([]u8)strconv.itoa(buf, num-1))
-    if(err != nil){
-        log.fatalf("failed to increment tracked exercise - %s", reflect.enum_string(err))
-    }
+    save_exer(num-1)
 
     return
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+save_exer :: proc(num: int){
+    buf: [32]u8
+    err := os.write_entire_file(filename, strconv.write_int(buf[:], i64(num), 10))
+    if(err != nil){
+        log.fatalf("failed to save tracked exercise - %v", err)
+    }
+}
